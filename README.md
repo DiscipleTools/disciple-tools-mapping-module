@@ -1,1 +1,1 @@
-# disciple-tools-mapping-widget
+# disciple-tools-mapping-module
