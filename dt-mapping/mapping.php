@@ -17,13 +17,14 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
         public $module_path;
         public $module_url;
         public $endpoints;
+        public $cache_length;
 
         // Singleton
         private static $_instance = null;
         public static function instance() {
             global $dt_mapping;
             if ( is_null( self::$_instance ) ) {
-                self::$_instance = new self($dt_mapping);
+                self::$_instance = new self( $dt_mapping );
             }
             return self::$_instance;
         }
@@ -47,6 +48,13 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
              *
              * Themes or plugins implementing the module need to add a simple filter to check
              * permissions and control access to the mapping module resource. By default the module is disabled.
+             *
+             * For targeted use. Give only the 'read_location' permission
+             *
+             * Governing filter living inside
+             * @link mapping-module-config.php
+             *
+             *
              * Example:
              *      add_filter( 'dt_mapping_module_has_permissions', function() {
              *          if ( current_user_can( 'view_any_contacts' ) ) {
@@ -60,6 +68,8 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
                 return;
             }
             /** END PERMISSION CHECK */
+
+
 
             /**
              * SET FILE LOCATIONS
@@ -266,6 +276,7 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
             $settings['spinner_large'] = ' <img src="'. $dt_mapping['spinner'] . '" width="24px" />';
             $settings['heatmap_focus'] = 0;
             $settings['current_map'] = 'top_map_list';
+            $settings['cached'] = 0; // this controls the endpoint transient caching
 
             return $settings;
         }
@@ -298,7 +309,13 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
 
         }
 
+        /************************************************************************************************************
+         * ENDPOINTS
+         ************************************************************************************************************/
         public function default_endpoints( $endpoints = [] ) {
+            /** Defines a default length of cache. @var cache_length */
+            $this->cache_length = apply_filters( 'dt_mapping_cache_length', 60 *60 );
+
             $endpoints['get_default_map_data_endpoint'] = [
                 'namespace' => $this->namespace,
                 'route' => '/mapping_module/get_default_map_data',
@@ -344,24 +361,57 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
                 return new WP_Error( __METHOD__, 'No permission', [ 'status' => 101 ] );
             }
 
-            return $this->localize_script();
+            if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                $trans_key = 'dt_default_map_';
+                if ( ! empty( get_transient( $trans_key ) ) ) {
+                    return get_transient( $trans_key );
+                }
+            }
+
+            $response = $this->localize_script();
+
+            // set transient for cached
+            if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                set_transient( $trans_key, $response, $this->cache_length );
+            }
+
+            return $response;
         }
 
         public function get_map_by_grid_id_endpoint( WP_REST_Request $request ) {
-            if ( ! $this->permissions ) {
+            if ( ! current_user_can( 'read_location' ) ) {
                 return new WP_Error( __METHOD__, 'No permission', [ 'status' => 101 ] );
             }
-
             $params = $request->get_params();
+
             if ( isset( $params['grid_id'] ) ) {
-                return $this->map_level_by_grid_id( $params['grid_id'] );
+                // check for cached
+                if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                    dt_write_log( 'cache triggered' );
+                    dt_write_log( $this->cache_length );
+                    $trans_key = 'dt_grid_' . hash( 'sha256', $params['grid_id'] );
+                    if ( ! empty( get_transient( $trans_key ) ) ) {
+                        return get_transient( $trans_key );
+                    }
+                }
+
+                $grid_id = sanitize_key( wp_unslash( $params['grid_id'] ) );
+
+                $response = $this->map_level_by_grid_id( $grid_id );
+
+                // set transient for cache
+                if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                    set_transient( $trans_key, $response, $this->cache_length );
+                }
+
+                return $response;
             } else {
                 return new WP_Error( __METHOD__, 'Missing parameters.', [ 'status' => 400 ] );
             }
         }
 
         public function modify_location_endpoint( WP_REST_Request $request ) {
-            if ( !user_can( get_current_user_id(), 'manage_dt' ) ) {
+            if ( ! $this->permissions ) {
                 return new WP_Error( 'permissions', 'No permissions for the action.', [ 'status' => 401 ] );
             }
 
@@ -371,7 +421,7 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
         }
 
         public function search_location_grid_by_name( WP_REST_Request $request ){
-            if ( !current_user_can( 'read_location' )){
+            if ( ! current_user_can( 'read_location' ) ) {
                 return new WP_Error( __FUNCTION__, "No permissions to read locations", [ 'status' => 403 ] );
             }
             $params = $request->get_params();
@@ -413,9 +463,24 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
             $params = $request->get_params();
 
             if ( isset( $params['grid_id'] ) ) {
+                // check for cached
+                if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                    $trans_key = 'dt_drill_' . hash( 'sha256', $params['grid_id'] );
+                    if ( ! empty( get_transient( $trans_key ) ) ) {
+                        return get_transient( $trans_key );
+                    }
+                }
+
                 $grid_id = sanitize_key( wp_unslash( $params['grid_id'] ) );
 
-                return $this->drill_down_array( $grid_id );
+                $response = $this->drill_down_array( $grid_id );
+
+                // set transient for cached
+                if ( isset( $params['cached'] ) && ! empty( $params['cached'] ) ) {
+                    set_transient( $trans_key, $response, $this->cache_length );
+                }
+
+                return $response;
             } else {
                 return new WP_Error( __METHOD__, 'Missing parameters.', [ 'status' => 400 ] );
             }
@@ -439,6 +504,9 @@ if ( ! class_exists( 'DT_Mapping_Module' ) ) {
 
             return new WP_Error( __METHOD__, 'Missing parameters.', [ 'status' => 400 ] );
         }
+        /************************************************************************************************************
+         * END ENDPOINTS
+         ************************************************************************************************************/
 
 
         /**
